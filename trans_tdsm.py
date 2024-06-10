@@ -19,7 +19,9 @@ wandb.login()
 # TDSM libs
 # Adds util directory to directories interpreter will search for modules
 #sys.path.insert(0, '/afs/cern.ch/work/j/jthomasw/private/NTU/fast_sim/tdsm_encoder/util')
+sys.path.insert(0, '/home/ken91021615/tdsm_encoder_sweep0512/util')
 sys.path.insert(1, 'util') # Local path / user independent
+sys.path.insert(2, 'toy_model')
 import data_utils as utils
 import score_model as score_model
 import sdes as sdes
@@ -27,6 +29,7 @@ import display
 import samplers as samplers
 import Convertor as Convertor
 from Convertor import Preprocessor
+import fid_score1 as fid_score1
 
 
 def train_log(loss, batch_ct, epoch):
@@ -49,13 +52,15 @@ def check_mem():
     print('Memory usage of current process 0 [GB]: ', process.memory_info().rss/(1024 * 1024 * 1024))
     return
 
-def train_model(files_list_, device='cpu'):
+def train_model(files_list_, device='cpu',serialized_model=True):
 
     # access all HPs through wandb.config, so logging matches execution!
     config = wandb.config
+    if config.batch_size == 64:
+        config.num_encoder_blocks = 8
     print(f'training config: {config}')
 
-    wd = wandb.config.work_dir
+    wd = os.getcwd()
     #wd = '/afs/cern.ch/work/j/jthomasw/private/NTU/fast_sim/tdsm_encoder/'
     output_files = 'training_'+datetime.now().strftime('%Y%m%d_%H%M')+'_output/'
     output_directory = os.path.join(wd, output_files)
@@ -75,7 +80,11 @@ def train_model(files_list_, device='cpu'):
 
     # Instantiate model
     loss_fn = score_model.ScoreMatchingLoss()
-    model = score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+    if not serialized_model:
+        model = score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+    else:
+        model = score_model.get_seq_model(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+    #model = score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
 
     table = PrettyTable(['Module name', 'Parameters listed'])
     t_params = 0
@@ -137,7 +146,7 @@ def train_model(files_list_, device='cpu'):
                 # Zero any gradients from previous steps
                 optimiser.zero_grad()
                 # Loss average for each batch
-                loss = loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value=0.0, device=device, diffusion_on_mask=False)
+                loss = loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value=0.0, device=device, diffusion_on_mask=False,serialized_model=True, cp_chunks=4)
                 # collect dL/dx for any parameters (x) which have requires_grad = True via: x.grad += dL/dx
                 loss.backward()
                 cumulative_epoch_loss+=loss.item()
@@ -154,7 +163,7 @@ def train_model(files_list_, device='cpu'):
                     model.eval()
                     shower_data = shower_data.to(device)
                     incident_energies = incident_energies.to(device)
-                    test_loss = score_model.loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value=0.0, device=device)
+                    test_loss = score_model.loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value=0.0, device=device,serialized_model=True, cp_chunks=4)
 
         scheduler.step()
         
@@ -167,15 +176,18 @@ def train_model(files_list_, device='cpu'):
     return save_name
 
 
-def generate(files_list_, load_filename, device='cpu'):
+def generate(files_list_, load_filename, device='cpu', serialized_model=True):
 
-    wd = wandb.config.work_dir
+    wd = os.getcwd()
     output_file = 'sampling_'+datetime.now().strftime('%Y%m%d_%H%M')+'_output/'
     output_directory = os.path.join(wd, output_file)
     print('Sampling directory: ', output_directory)
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
     config = wandb.config
+
+    if config.batch_size == 64:
+        config.num_encoder_blocks = 8
 
     # Instantiate stochastic differential equation
     if config.SDE == 'subVP':
@@ -188,7 +200,11 @@ def generate(files_list_, load_filename, device='cpu'):
     diffusion_coeff_fn = functools.partial(sde.sde)
 
     # Load saved model
-    model=score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+    if not serialized_model:
+        model = score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+    else:
+        model = score_model.get_seq_model(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+    #model=score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
     if load_filename == '':
         load_name = os.path.join(wd,'training_20240408_1350_output/ckpt_tmp_299.pth')
     else:
@@ -224,7 +240,8 @@ def generate(files_list_, load_filename, device='cpu'):
     # create list to store final samples
     sample_ = []
     # instantiate sampler 
-    sampler = samplers.pc_sampler(sde=sde, padding_value=0.0, snr=0.16, sampler_steps=config.sampler_steps, steps2plot=plotsteps, device=device, jupyternotebook=False)
+    gen_start_time = time.time()
+    sampler = samplers.pc_sampler(sde=sde, padding_value=0.0, snr=0.16, sampler_steps=config.sampler_steps,steps2plot=plotsteps, device=device, jupyternotebook=False,serialized_model=True)
 
     # Collect Geant4 shower information
     for file_idx in range(len(files_list_)):
@@ -349,21 +366,21 @@ def generate(files_list_, load_filename, device='cpu'):
         # Loop over each batch of noise showers
         print(f'# batches: {len(gen_hits_loader)}' )
         for i, (gen_hit, sampled_energies) in enumerate(gen_hits_loader,0):
-            print(f'Generation batch {i}: showers per batch: {gen_hit.shape[0]}, max. hits per shower: {gen_hit.shape[1]}, features per hit: {gen_hit.shape[2]}, sampled_energies: {len(sampled_energies)}')    
+            #print(f'Generation batch {i}: showers per batch: {gen_hit.shape[0]}, max. hits per shower: {gen_hit.shape[1]}, features per hit: {gen_hit.shape[2]}, sampled_energies: {len(sampled_energies)}')    
             sys.stdout.write('\r')
             sys.stdout.write("Progress: %d/%d \n" % ((i+1), len(gen_hits_loader)))
             sys.stdout.flush()
             
             # Run reverse diffusion sampler
             #generative = sampler(model, marginal_prob_std_fn, diffusion_coeff_fn, sampled_energies, gen_hit, batch_size=gen_hit.shape[0], energy_trans_file=energy_trans_file, x_trans_file=x_trans_file , y_trans_file = y_trans_file, ine_trans_file=ine_trans_file)
-            generative = sampler(model, sampled_energies, gen_hit, batch_size=gen_hit.shape[0])
+            generative = sampler(model, sampled_energies, gen_hit, batch_size=gen_hit.shape[0],corrector_steps = config.correction_steps)
             # Create first sample or concatenate sample to sample list
             if i == 0:
                 sample = generative
             else:
                 sample = torch.cat([sample,generative])
             
-            print(f'sample: {sample.shape}')
+            #print(f'sample: {sample.shape}')
             
         sample_np = sample.cpu().numpy()
 
@@ -374,7 +391,8 @@ def generate(files_list_, load_filename, device='cpu'):
     print(f'sample_: {len(sample_)}, sampled_ine: {len(sampled_ine)}')
     sample_savename = os.path.join(output_directory, 'sample.pt')
     torch.save([sample_,sampled_ine], sample_savename)
-
+    gen_end_time = time.time()
+    elapsed_time = gen_end_time - gen_start_time
     gen_data = utils.cloud_dataset(sample_savename,device=device)
     # Generated distributions
     dists_gen = display.plot_distribution(gen_data, nshowers_2_plot=config.n_showers_2_gen, padding_value=0.0)
@@ -382,10 +400,14 @@ def generate(files_list_, load_filename, device='cpu'):
     dists = display.plot_distribution(files_list_, nshowers_2_plot=config.n_showers_2_gen, padding_value=0.0)
     comparison_fig = display.comparison_summary(dists, dists_gen, output_directory)#, erange=(-5,3), xrange=(-2.5,2.5), yrange=(-2.5,2.5), zrange=(0,1))
     # Add evaluation plots to keep on wandb
-    wandb.log({"summary" : wandb.Image(comparison_fig)})
+    test = fid_score1.Score(dists[3],dists[4],dists[5],dists[6],dists_gen[3],dists_gen[4],dists_gen[5],dists_gen[6])
+    score_fid = test.FID_score()
+    score_fid_4D = test.FID_score_4D()
+    wandb.log({"summary" : wandb.Image(comparison_fig),"FID_e" : score_fid[0], "FID_x" : score_fid[1], "FID_y" : score_fid[2], "FID_z" : score_fid[3], "FID" : score_fid_4D, "time_consuming" : elapsed_time})
+    #wandb.log({"summary" : wandb.Image(comparison_fig)})
     return output_directory
 def main(config=None):
-   
+    
     indir = args.inputs
     switches_ = int('0b'+args.switches,2)
     switches_str = bin(int('0b'+args.switches,2))
@@ -410,7 +432,7 @@ def main(config=None):
         print('Current device: ', torch.cuda.current_device())
         print('Cuda arch list: ', torch.cuda.get_arch_list())
     
-    print('Working directory: ' , config.work_dir)
+    print('Working directory: ' , os. getcwd())
 
     # Useful when debugging gradient issues
     torch.autograd.set_detect_anomaly(True)
@@ -422,13 +444,15 @@ def main(config=None):
     files_list_ = []
     print(f'Training files found in: {training_file_path}')
     for filename in os.listdir(training_file_path):
-        if fnmatch.fnmatch(filename, 'dataset_2_padded_nentry1033To1161.pt'):
+        if fnmatch.fnmatch(filename, 'dataset_2_padded_nentry*.pt'):
             files_list_.append(os.path.join(training_file_path,filename))
     print(f'Files: {files_list_}')
-
-    with wandb.init(config=config, dir=config.work_dir):
+    
+    with wandb.init(config=config, project='testsweep', entity='calo_tNCSM'):
         # access all HPs through wandb.config, so logging matches execution!
         config = wandb.config
+        if config.batch_size == 64:
+            config.num_encoder_blocks = 8
 
         #### Input plots ####
         if switches_ & trigger:
@@ -536,7 +560,7 @@ def main(config=None):
         if switches_>>3 & trigger:
             # Distributions object for generated files
             print(f'Generated inputs')
-            workingdir = wandb.config.work_dir
+            workingdir = os.getcwd()
             if not switches_>>2 & trigger:
               output_directory = os.path.join(workingdir,'sampling_100samplersteps_20230829_1606_output')
             print(f'Evaluation outputs stored here: {output_directory}')
@@ -684,40 +708,25 @@ if __name__=='__main__':
     argparser.add_argument('-i','--inputs',dest='inputs', help='Path to input directory', default='', type=str)
     argparser.add_argument('-c', '--config', dest='config', help='Configuration file for parameter monitoring (relative path)', default='', type=str)
     argparser.add_argument('-p', '--preprocessor', dest='preprocessor', help='pickle files of preprocessor', default='', type=str)
-    argparser.add_argument('--condor', dest = 'condor', default = 0, type=int)
-    parsed, unknown = argparser.parse_known_args()
-    for arg in unknown:
-        if arg.startswith(("-", "--")):
-        # you can pass any arguments to add_argument
-            argparser.add_argument(arg.split('=')[0])
-
     args = argparser.parse_args()
-
-    print(args)
-    if args.condor == 1: # Use condor to run
-      main(args)
-
-
-    else: # Local run
-
+    
     # WandB configuration
-      cfg_name = args.config
-      print(f'Using config: {cfg_name}')
+    cfg_name = args.config
+    print(f'Using config: {cfg_name}')
 
-      project_name = cfg_name.split('.')[0].split('_',1)[1]
-      print(f'Starting project: {project_name}')
+    project_name = cfg_name.split('.')[0].split('_', 1)[1].replace("/", "_")
+    print(f'Starting project: {project_name}')
 
-   #   if not os.path.exists(cfg_name):
-   #     cfg_name = os.path.join('../configs', cfg_name)
+    #if not os.path.exists(cfg_name):
+    #    cfg_name = os.path.join('../configs', cfg_name)
 
-
-      with open(cfg_name) as ymlfile:
+    with open(cfg_name) as ymlfile:
         sweep_yml = yaml.safe_load(ymlfile)
     
     # Run main function using sweep agents reading from configs
     # Sweeps run by setting range of parameter values to explore, else set single parameter value
     # Running from yaml files facilitates submitting (several) jobs to condor
-      n_runs = 1
-      sweep_id = wandb.sweep(sweep_yml, project="NCSM-"+project_name)
-      wandb.agent(sweep_id, main, count=n_runs)
+    n_runs = 100
+    sweep_id = wandb.sweep(sweep_yml, project="NCSM-"+project_name)
+    wandb.agent(sweep_id, main, count=n_runs)
 
