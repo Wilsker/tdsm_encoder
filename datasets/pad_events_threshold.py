@@ -83,8 +83,7 @@ def main():
             incident_energies = np.asarray( incident_energies ).reshape(-1, 1)
             #preprocessor.fit_incident_energy( incident_energies)
             incident_energies_org = incident_energies / GeV
-            incident_energies = preprocessor.transform_incident_energy(incident_energies)
-            incident_energies = torch.from_numpy( incident_energies.flatten() )
+            
             print(f'incident_energies:{incident_energies}')
             
             # Rescale hit energy and position and do padding
@@ -148,7 +147,8 @@ def main():
                 #padded_weights.append(padded_weight)
                 nhits.append(nhit)
                 shower_count+=1
-            
+            incident_energies = preprocessor.transform_incident_energy(incident_energies)
+            incident_energies = torch.from_numpy( incident_energies.flatten() ) 
             nhits = torch.from_numpy(np.array(nhits))
             torch.save([padded_showers,incident_energies, nhits], outfilename)
 
