@@ -12,6 +12,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import RobustScaler, PowerTransformer, minmax_scale
 from pickle import load
 from matplotlib import cm
+import h5py
 
 def invert_transform_e(e_):
     original_e = 0.5 * np.log( (1+np.array(e_)) / (1-np.array(e_)) )
@@ -778,3 +779,185 @@ def comparison_summary(dists, dists_gen, sampling_directory, erange=(), xrange=(
     plt.savefig( os.path.join(sampling_directory,'comparison.png') )
 
     return fig
+
+
+class High_class_feature_plot_test:
+    def __init__(self, source_file, reference_files, output_dir):
+        self.r_bins = 9
+        self.theata_bins = 16
+        self.z_bins = 45
+        source_file = h5py.File(source_file, 'r')
+        self.shower_gen, self.ine_gen = eib.extract_shower_and_energy(source_file, which='input')
+
+        # Initialize lists to store concatenated data and shower counts
+        self.shower_ref_list = []
+        self.ine_ref_list = []
+        self.shower_nums = []
+
+        i = 0 
+        self.batches = [1311,6685,774,613,615] # Up to how you load your file
+        # Load and concatenate all reference files, and keep track of shower counts
+        for ref_file in reference_files:
+            print(ref_file)
+            ref_file = h5py.File(ref_file, 'r')
+            shower_ref, ine_ref = eib.extract_shower_and_energy(ref_file, which='input')
+            batch = self.batches[i] 
+            self.shower_ref_list.append(shower_ref[:batch])
+            # if self.shower_ref_list[i] is torch.Tensor:
+            #print(self.shower_ref_list[i].shape())
+            self.ine_ref_list.append(ine_ref)
+            i += 1
+        # Concatenate the data from all reference files
+        self.shower_ref = np.concatenate(self.shower_ref_list, axis=0)
+        self.ine_ref = np.concatenate(self.ine_ref_list, axis=0)
+
+        # Convert to NumPy arrays
+        self.shower_gen = np.array(self.shower_gen)
+        self.shower_ref = np.array(self.shower_ref)
+
+        # Ensure the same number of showers in both gen and ref data
+        self.shower_num = self.shower_gen.shape[0]
+        #self.shower_gen = self.shower_gen[:self.shower_num]
+        #self.shower_ref = self.shower_ref[:self.shower_num]
+
+        # Reshape the data
+        self.reshaped_shower_gen = self.shower_gen.reshape(self.shower_num, self.z_bins, self.theata_bins, self.r_bins)
+        self.reshaped_shower_ref = self.shower_ref.reshape(self.shower_num, self.z_bins, self.theata_bins, self.r_bins)
+
+        self.output_dir = output_dir
+
+    def plot_energy_r(self):
+        # Calculate mean energy per r-bin for generated data
+        energy_per_r_layer_gen = []
+        energy_per_r_layer_ref = [] 
+        for i in range(self.r_bins):
+            energy_per_r_layer_gen.append(self.reshaped_shower_gen[:, :, :, i].sum() / self.shower_num)
+            energy_per_r_layer_ref.append(self.reshaped_shower_ref[:, :, :, i].sum() / self.shower_num)
+            print("type: ",type(self.reshaped_shower_ref))
+        energy_per_r_layer_gen = np.array(energy_per_r_layer_gen)
+        energy_per_r_layer_ref = np.array(energy_per_r_layer_ref)
+        
+        
+        # Plotting
+        fig, (ax1, ax2) = plt.subplots(2, 1, gridspec_kw={'height_ratios': [3, 1]}, figsize=(8, 6))
+        ax1.plot(energy_per_r_layer_gen, label='Gen', color='blue', marker='o')
+        ax1.plot(energy_per_r_layer_ref, label='Reference', color='red', marker='x')
+        ax1.set_xlabel('r-bin')
+        ax1.set_ylabel('energy')
+        ax1.set_title('energy vs r-bin')
+        ax1.legend()
+
+        # Compute percentage difference for plotting
+        percent_diff = 100 * (energy_per_r_layer_ref - energy_per_r_layer_gen) / energy_per_r_layer_ref
+        ax2.plot(percent_diff, label='Diff. (%)', color='purple', linewidth=1)
+        ax2.set_ylabel('Diff. (%)')
+        ax2.axhline(y=0, color='gray', linestyle='--')
+        ax2.set_xlabel('r-bin')
+
+        plt.tight_layout()
+        plt.savefig('energy_r.png')
+        return fig
+    def plot_energy_z(self):
+        # Plot: Mean energy per cell
+        energy_per_z_layer = []
+        energy_per_z_layer_ref = []
+        for i in range(self.z_bins):
+            energy_per_z_layer.append(self.reshaped_shower_gen[:,i,:,:].sum() / self.shower_num)
+            energy_per_z_layer_ref.append(self.reshaped_shower_ref[:,i,:,:].sum() / self.shower_num)
+        #energy_per_z_layer = self.reshaped_shower_gen.sum(axis=(0, 1, 3)) / self.shower_num
+        #energy_per_z_layer_ref = self.reshaped_shower_ref.sum(axis=(0, 1, 3)) / self.shower_num
+        energy_per_z_layer = np.array(energy_per_z_layer)
+        energy_per_z_layer_ref = np.array(energy_per_z_layer_ref)
+        fig, (ax1, ax2) = plt.subplots(2, 1, gridspec_kw={'height_ratios': [3, 1]}, figsize=(8, 6))
+        ax1.plot(energy_per_z_layer, label='Gen', color='blue', marker='o')
+        ax1.plot(energy_per_z_layer_ref, label='Reference', color='red', marker = 'x')
+        ax1.set_xlabel('layers')
+        ax1.set_ylabel('mean dep energy')
+        ax1.set_title('mean dep energy vs layers')
+        ax1.legend()
+        percent_diff = 100 * (energy_per_z_layer_ref - energy_per_z_layer) / energy_per_z_layer_ref
+        ax2.plot(percent_diff, label='Diff. (%)', color='purple', linewidth=1)
+        ax2.set_ylabel('Diff. (%)')
+        ax2.axhline(y=0, color='gray', linestyle='--')
+        ax2.set_xlabel('layers')
+
+        plt.tight_layout()
+
+        # Save the plot
+        plt.savefig('mean_dep_z_1.png')
+
+        return fig
+
+    def r_width(self):
+        r_width_gen = []
+        r_width_ref = []
+        r_square_mean_gen = np.zeros_like(self.reshaped_shower_gen)
+        r_square_mean_ref = np.zeros_like(self.reshaped_shower_ref)
+        r_mean_square_gen = np.zeros_like(self.reshaped_shower_gen)
+        r_mean_square_ref = np.zeros_like(self.reshaped_shower_ref)
+        print(self.reshaped_shower_gen.shape)
+        print(self.reshaped_shower_gen.sum()) 
+        for j in range(self.r_bins):
+            r_square_mean_gen[:,:,:,j] = self.reshaped_shower_gen[:,:,:,j]*j**2/self.reshaped_shower_gen.sum()
+            r_square_mean_ref[:,:,:,j] = self.reshaped_shower_ref[:,:,:,j]*j**2/self.reshaped_shower_ref.sum()
+            r_mean_square_gen[:,:,:,j] = (self.reshaped_shower_gen[:,:,:,j]*j/self.reshaped_shower_gen.sum())**2
+            r_mean_square_ref[:,:,:,j] = (self.reshaped_shower_ref[:,:,:,j]*j/self.reshaped_shower_ref.sum())**2
+
+        for i in range(self.z_bins):
+            r_width_gen.append( np.sqrt((r_square_mean_gen[:,i,:,:]-r_mean_square_gen[:,i,:,:]).sum()))
+            r_width_ref.append(np.sqrt((r_square_mean_ref[:,i,:,:]-r_mean_square_ref[:,i,:,:]).sum()))
+        r_width_gen = np.array(r_width_gen)
+        r_width_ref = np.array(r_width_ref)
+        fig, (ax1, ax2) = plt.subplots(2, 1, gridspec_kw={'height_ratios': [3, 1]}, figsize=(8, 6))
+        ax1.plot(r_width_gen, label='Gen', color='blue', marker='o')
+        ax1.plot(r_width_ref, label='Reference', color='red', marker = 'x')
+        ax1.set_xlabel('r-bin')
+        ax1.set_ylabel('width')
+        ax1.set_title('width vs z-bin')
+        ax1.legend()
+        percent_diff = 100 * (r_width_ref - r_width_gen) / r_width_ref
+        ax2.plot(percent_diff, label='Diff. (%)', color='purple', linewidth=1)
+        ax2.set_ylabel('Diff. (%)')
+        ax2.axhline(y=0, color='gray', linestyle='--')
+        ax2.set_xlabel('z-bins')
+        plt.tight_layout()
+
+        # Save the plot
+        plt.savefig('r_width_1.png')
+
+        return fig
+
+    def max_voxel_dep_energy_layer(self):
+        # a 2d np array with shape (shower_num, z_bins)
+        max_voxel_dep_energy_gen = np.empty((self.shower_num, self.z_bins))
+        max_voxel_dep_energy_ref = np.empty((self.shower_num, self.z_bins))
+        #max_voxel_dep_energy_gen = np.array
+        #max_voxel_dep_energy_ref = []
+        print(self.reshaped_shower_gen.shape)
+        print(f"Type of self.reshaped_shower_gen: {type(self.reshaped_shower_gen)}")
+        for j in range(self.shower_num):
+            for i in range(self.z_bins):
+                gen = self.reshaped_shower_gen[j,i,:,:]
+                max_voxel_dep_energy_gen[j,i]=(self.reshaped_shower_gen[j,i,:,:].max()/(self.reshaped_shower_gen[j,i,:,:].sum()+1e-8))
+                max_voxel_dep_energy_ref[j,i]=(self.reshaped_shower_ref[j,i,:,:].max()/(self.reshaped_shower_ref[j,i,:,:].sum()+1e-8))
+        max_voxel_dep_energy_gen = np.array(max_voxel_dep_energy_gen.mean(axis=0))
+        max_voxel_dep_energy_ref = np.array(max_voxel_dep_energy_ref.mean(axis=0))
+        fig, (ax1, ax2) = plt.subplots(2, 1, gridspec_kw={'height_ratios': [3, 1]}, figsize=(8, 6))
+        ax1.plot(max_voxel_dep_energy_gen, label='Gen', color='blue', marker='o')
+        ax1.plot(max_voxel_dep_energy_ref, label='Reference', color='red', marker = 'x')
+        ax1.set_xlabel('layers')
+        ax1.set_ylabel('max voxel dep energy')
+        ax1.set_title('max voxel dep energy vs layers')
+        ax1.legend()
+        percent_diff = 100 * (max_voxel_dep_energy_ref - max_voxel_dep_energy_gen) / max_voxel_dep_energy_ref
+        ax2.plot(percent_diff, label='Diff. (%)', color='purple', linewidth=1)
+        ax2.set_ylabel('Diff. (%)')
+        ax2.axhline(y=0, color='gray', linestyle='--')
+        ax2.set_xlabel('layers')
+
+        plt.tight_layout()
+        
+        # Save the plot
+        plt.savefig('max_voxel_dep_energy_1.png')
+
+        return fig
